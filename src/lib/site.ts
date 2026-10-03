@@ -17,7 +17,7 @@ export const SITE = {
   founded: 2005,
   npn: "8608479",
   address: {
-    street: "12220 E Riggs Road, Suite #105",
+    street: "12220 E Riggs Rd, Suite #104",
     city: "Chandler",
     state: "AZ",
     zip: "85249",
@@ -188,26 +188,3 @@ export const STATS = [
   { value: 50, suffix: "", label: "States licensed & writing", prefix: "" },
 ] as const;
 
-export const TESTIMONIALS = [
-  {
-    quote:
-      "Every general contractor we frame for needs a GL certificate with us named additional insured before we can roll. CCA turns those around in minutes and built a program that actually covers our falls and nail-gun claims — not the generic handyman policy our last broker sold us.",
-    name: "Marcus T.",
-    role: "Framing Company Owner",
-    location: "Texas",
-  },
-  {
-    quote:
-      "When a lumber package walked off our jobsite overnight, the tools-and-equipment floater CCA set up paid out fast and we kept the schedule. They get that a framing crew lives and dies by its gear and its materials.",
-    name: "Daniela R.",
-    role: "Operations Manager",
-    location: "Florida",
-  },
-  {
-    quote:
-      "Our workers' comp was coded as generic construction and we were getting killed on premium. CCA re-classed us properly under 5403, documented our fall-protection program, and dropped our rate while increasing coverage. Wish we'd switched years ago.",
-    name: "Tyler J.",
-    role: "Crew Owner",
-    location: "Colorado",
-  },
-] as const;
