@@ -1,16 +1,47 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Navbar } from "@/components/sections/Navbar";
 import { Footer } from "@/components/sections/Footer";
 import { FadeIn } from "@/components/animations/FadeIn";
 import { SITE } from "@/lib/site";
 import { US_STATES, QUOTE_SERVICE_TYPES, YEARS_OPTIONS } from "@/lib/content";
+import { CanonicalFields } from "@/components/quote/CanonicalFields";
+import {
+  emptyQuote, fieldsFor, oneYearAfter, resolveOptions, sanitizeYn, validateQuote, US_STATE_CODES,
+  type Flat, type QuoteOptions,
+} from "@/lib/quote/quoteSpec";
 import { CheckCircle2, ShieldCheck, ArrowRight, Phone, Clock, Zap, MapPin } from "lucide-react";
 
 const WEBHOOK_URL =
   "https://josh.jam-bot.com/social-api/api/leads/webhook/netlify?tenant=josh&site=framingcontractorinsurance.com";
+
+// Canonical ACORD fields are ADDED alongside the existing fields (nothing renamed or removed).
+// tradeType is the one class this site sells; the mapper derives SIC/NAICS from it (none are asked or sent).
+const TRADE_TYPE = "Carpentry / Framing";
+const QUOTE_OPTIONS: QuoteOptions = { yn: "audit", subcontractedDescriptionRequired: false, tradeTypeOptions: [TRADE_TYPE] };
+// Legacy field -> canonical field it also feeds (copied on submit only when the legacy value is valid and the
+// canonical field was not filled). Legacy values are still posted under their own names.
+const ALIASES: Array<[string, string]> = [
+  ["street_address", "address"], ["business_description", "businessDescription"],
+  ["prior_year_gross_sales", "lastGrossSales"], ["prior_year_subcontractor_expenses", "lastSubcontractingCosts"],
+  ["prior_year_employee_count", "lastEmployeeCount"], ["prior_year_employee_payroll", "lastEmployeePayroll"],
+  ["estimated_gross_sales", "nextGrossEstimate"], ["estimated_subcontractor_expenses", "nextSubcontractingCosts"],
+  ["estimated_employee_count", "nextEmployeeCount"], ["estimated_employee_payroll", "nextEmployeePayroll"],
+  ["estimated_material_costs", "nextMaterialCosts"], ["prior_carrier_name", "currentCarrier"],
+  ["prior_policy_expiration", "currentPolicyExpiration"], ["year_business_started", "yearBusinessStarted"],
+];
+// where a missing canonical value is entered on the legacy form (for the error summary)
+const LEGACY_LABEL: Record<string, string> = {
+  address: "Street address", lastGrossSales: "Prior year gross sales",
+  lastSubcontractingCosts: "Prior year subcontractor expenses", businessDescription: "Description of business",
+  firstName: "Full name", lastName: "Full name (first and last)",
+};
+// the legacy state select posts FULL names; canonical validation/physicalState use postal codes
+const STATE_CODE: Record<string, string> = Object.fromEntries(
+  US_STATES.map((n, i) => [n, US_STATE_CODES.filter((c) => c !== "DC")[i]])
+);
 
 const trustItems = [
   { icon: ShieldCheck, title: "Built for framers", desc: "Policies written for framing & rough-carpentry crews — not generic handyman coverage." },
@@ -32,6 +63,68 @@ export default function QuotePage() {
     "bot-field": "",
     street_address: "", city: "", zip: "", prior_year_gross_sales: "", prior_year_subcontractor_expenses: "", prior_year_employee_count: "", prior_year_employee_payroll: "", estimated_gross_sales: "", estimated_subcontractor_expenses: "", estimated_employee_count: "", estimated_employee_payroll: "", estimated_material_costs: "", subcontractors_have_insurance: "", percent_subcontractors_insured: "", coverage_for_uninsured_subcontractors: "", coverage_types: "", annual_gross_sales: "", year_business_started: "", business_description: "", class_code_1: "", class_code_2: "", class_code_3: "", class_code_4: "", class_code_5: "", residential_vs_commercial: "", new_vs_existing_construction: "", largest_projects: "", prior_carrier_name: "", prior_policy_number: "", prior_policy_expiration: "",
   });
+  const qopts = resolveOptions(QUOTE_OPTIONS);
+  const [cq, setCq] = useState<Flat>(() => ({ ...emptyQuote(), tradeType: TRADE_TYPE }));
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [attrVals, setAttrVals] = useState({ traffic_source: "", landing_url: "" });
+  const attr = useRef(attrVals);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      let src = p.get("utm_source") || p.get("ref") || "";
+      if (!src && document.referrer) { try { src = new URL(document.referrer).hostname; } catch { src = document.referrer; } }
+      if (!src) src = "direct";
+      attr.current = { traffic_source: src, landing_url: window.location.href };
+      setAttrVals(attr.current);
+    } catch {}
+  }, []);
+  const setField = (name: string, value: string) => setCq((prev) => ({ ...prev, [name]: value }));
+  const touch = (name: string) => setTouched((t) => ({ ...t, [name]: true }));
+
+  // Build the canonical record from the add-on state + the legacy fields that feed it.
+  const buildCanonical = (): Flat => {
+    const fd = formData as Record<string, string>;
+    const data: Flat = { ...cq };
+    data.name = (fd.name || "").trim();
+    data.businessName = fd.businessName; data.email = fd.email; data.phone = fd.phone;
+    data.city = fd.city; data.zip = fd.zip;
+    data.state = fd.state; // full name, as the legacy select posts it (mapper translates)
+    const parts = data.name.split(/\s+/).filter(Boolean);
+    data.firstName = parts[0] || "";
+    data.lastName = parts.slice(1).join(" ");
+    for (const [from, to] of ALIASES) {
+      if (!(data[to] || "").trim() && (fd[from] || "").trim()) data[to] = fd[from].trim();
+    }
+    if (data.businessStartDate) data.yearBusinessStarted = data.businessStartDate.slice(0, 4);
+    if (!data.desiredExpirationDate && data.desiredEffectiveDate) data.desiredExpirationDate = oneYearAfter(data.desiredEffectiveDate);
+    if (data.yn_coverageTerminated === "Yes") {
+      for (const r of ["nonPayment", "nonRenewal", "agentStopRepresenting", "underwriting", "conditionCorrected"]) {
+        const k = `general_coverageTerminated__${r}`; if (data[k] !== "Yes") data[k] = "No";
+      }
+    }
+    return sanitizeYn(data);
+  };
+  const canonical = buildCanonical();
+  // validation copy: state as a postal code (validator requirement only; the posted value stays the legacy one)
+  const errors = validateQuote(
+    { ...canonical, state: STATE_CODE[canonical.state] || canonical.state }, new Date(), QUOTE_OPTIONS
+  );
+  // errors on fields the legacy inputs feed are shown in the summary under the legacy label
+  const pretty = (k: string) => { const t = k.replace(/_/g, " "); return t.charAt(0).toUpperCase() + t.slice(1); };
+  const summaryFor = (errs: Record<string, string>) => {
+    const out = new Set<string>();
+    for (const k of Object.keys(errs)) {
+      const alias = ALIASES.find(([, to]) => to === k);
+      if (LEGACY_LABEL[k]) out.add(LEGACY_LABEL[k]);
+      else if (alias) out.add(pretty(alias[0]));
+      else if (k === "state") out.add("Primary state");
+      else if (k === "zip") out.add("ZIP code");
+      else if (k === "city") out.add("City");
+    }
+    return Array.from(out);
+  };
+  const [summary, setSummary] = useState<string[]>([]);
+
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -45,14 +138,31 @@ export default function QuotePage() {
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (formData["bot-field"]) return;
+    const errs = errors;
+    if (Object.keys(errs).length) {
+      setTouched((t) => ({ ...t, ...Object.fromEntries(Object.keys(errs).map((k) => [k, true])) }));
+      setSummary(summaryFor(errs));
+      setError("Please complete the highlighted fields.");
+      return;
+    }
+    setSummary([]);
     setSubmitting(true);
     setError("");
+    // legacy fields keep their own names; canonical fields are added next to them
+    const payload: Record<string, string> = { ...(formData as Record<string, string>) };
+    for (const f of fieldsFor(QUOTE_OPTIONS)) {
+      if (f === "sicCode" || f === "naicsCode") continue; // never asked or sent (agency-assigned)
+      if (f in payload && f !== "address") continue; // shared names (name, businessName, email, phone, state, city, zip) stay legacy
+      payload[f] = canonical[f] ?? "";
+    }
+    payload.traffic_source = attr.current.traffic_source;
+    payload.landing_url = attr.current.landing_url;
     let captured = false;
     try {
       const res = await fetch(WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ form_name: "quote", source: "framingcontractorinsurance.com", ...formData }),
+        body: JSON.stringify({ form_name: "quote", source: "framingcontractorinsurance.com", ...payload }),
       });
       if (res.ok) {
         const body = await res.json().catch(() => null);
@@ -66,7 +176,7 @@ export default function QuotePage() {
         const fres = await fetch("/__forms.html", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ "form-name": "quote", ...(formData as Record<string, string>) }).toString(),
+          body: new URLSearchParams({ "form-name": "quote", ...payload }).toString(),
         });
         captured = fres.ok;
       } catch {}
@@ -240,7 +350,41 @@ export default function QuotePage() {
                         />
                       </div>
 
-                      {error && <p className="text-red-600 text-sm font-medium">{error}</p>}
+                      <input type="hidden" name="traffic_source" value={attrVals.traffic_source} readOnly />
+                      <input type="hidden" name="landing_url" value={attrVals.landing_url} readOnly />
+
+                      <CanonicalFields
+                        v={cq}
+                        setField={setField}
+                        touched={touched}
+                        touch={touch}
+                        errors={errors}
+                        opts={qopts}
+                        mailing={{
+                          address: formData.street_address,
+                          city: formData.city,
+                          stateCode: STATE_CODE[formData.state] || "",
+                          zip: formData.zip,
+                        }}
+                        classes={{
+                          section: "space-y-4",
+                          heading: "font-heading font-bold text-espresso text-lg",
+                          grid: "grid sm:grid-cols-2 gap-4",
+                          label: labelClass,
+                          input: inputClass,
+                          error: "text-red-600 text-xs mt-1",
+                          legend: labelClass,
+                          option: "flex items-center gap-2 text-sm text-espresso",
+                          detail: "mt-2 grid sm:grid-cols-2 gap-3 pl-4 border-l-2 border-adobe",
+                        }}
+                      />
+
+                      {error && (
+                        <p className="text-red-600 text-sm font-medium">
+                          {error}
+                          {summary.length > 0 && <> Also needed above: {summary.join(", ")}.</>}
+                        </p>
+                      )}
 
                       <button
                         type="submit"
